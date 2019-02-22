@@ -1,0 +1,468 @@
+---
+title: "bi594_HW1"
+author: "Rebecca Decamp, Melissa Zarate and Christian Gagnon"
+date: "2/14/2019"
+output: html_document
+---
+
+#####################################
+
+#Team SMGAL ITS analysis
+#Almost entirely based on DADA2 Pipeline 1.8 Walkthrough:
+#https://benjjneb.github.io/dada2/tutorial.html
+#with edits by Carly D. Kenkel and modifications for my data by Christian Gagnon, Melissa Zarate and Rebecca Decamp
+#2/14/19
+
+#R Version 3.5.2
+#RStudio Version 1.1.463
+#dada2 Version 1.10.1
+#Phyloseq Version 1.26
+#ggplots2 Version 3.1.0
+#Rmisc Version 1.5
+
+
+####Introduction#####
+
+#Marine fungi are not well studied at all, let alone coral-associated fungi, but metabarcoding analyses have shown that some sort of relationship between the two exist. In those analyses, such as wegley et al., most coral associated fungi taxa seem to overlap with terrestrial taxa.Bacterial symbionts known to have heterotrophic relationships with coral. Despite our lack of knowledge about fungal relationships with coral, we know fungi are present in coral.Amend et al. found taxa belonging to parasitic clade in transcriptome analysis.Wegley et al. found fungal genes involved in nitrate/nitrite ammonification, suggesting that they convert nitrogen for algal symbionts. Differences in inshore and offshore bacteria communities in coral has been widely studied. McCliment et al., 2012 (16S):found more bacterial communities/ more OTUs inshore.On the other hand, other studies (Pantos et al) have found less diversity overall inshore. In our study we looked ant fungal communities in 3 location around the islands of Moorea and Tahiti which at both inshore and offshore sites.
+
+#We hypothesized that there would be more diversity in fungal communities in offshore coral reef populations primarily due to the reduced amount of UV exposure since fungi grow best in low light environments. But also, because of deeper waters have less disturbance, and less extreme conditions (such as temperature variation).
+
+#~########################~#
+##### PRE-PROCESSING #######
+#~########################~#
+
+#fastq files should have R1 & R2 designations for PE reads
+#Also - some pre-trimming. Retain only PE reads that match amplicon primer. Remove reads containing Illumina sequencing adapters
+
+#in Terminal home directory:
+#following instructions of installing BBtools from https://jgi.doe.gov/data-and-tools/bbtools/bb-tools-user-guide/installation-guide/
+#1. download BBMap package, sftp to installation directory
+#2. untar: 
+#tar -xvzf BBMap_(version).tar.gz
+#3. test package:
+#cd bbmap
+#~/bin/bbmap/stats.sh in=~/bin/bbmap/resources/phix174_ill.ref.fa.gz
+
+# my adaptors, which I saved as "adaptors.fasta"
+# >forward
+# AATGATACGGCGACCAC
+# >forwardrc
+# GTGGTCGCCGTATCATT
+# >reverse
+# CAAGCAGAAGACGGCATAC
+# >reverserc
+# GTATGCCGTCTTCTGCTTG
+
+#primers for ITS:
+# >forward
+# GTGAATTGCAGAACTCCGTG
+# >reverse
+# CCTCCGCTTACTTATATGCTT
+
+#Still in terminal
+#ls *R1_001.fastq | cut -d '_' -f 1 > samples.list
+#for file in $(cat samples.list); do  mv ${file}_*R1*.fastq ${file}_R1.fastq; mv ${file}_*R2*.fastq ${file}_R2.fastq; done 
+#for file in $(cat samples.list); do ~/bin/bbmap/bbduk.sh in1=${file}_R1.fastq in2=${file}_R2.fastq ref=adaptors.fasta k=12 out1=${file}_R1_NoIll.fastq out2=${file}_R2_NoIll.fastq; done &>bbduk_NoIll.log
+#for file in $(cat samples.list); do ~/bin/bbmap/bbduk.sh in1=${file}_R1_NoIll.fastq in2=${file}_R2_NoIll.fastq ftl=4 out1=${file}_R1_NoIll_No4N.fastq out2=${file}_R2_NoIll_No4N.fastq; done &>bbduk_No4N.log
+#for file in $(cat samples.list); do ~/bin/bbmap/bbduk.sh in1=${file}_R1_NoIll_No4N.fastq in2=${file}_R2_NoIll_No4N.fastq restrictleft=21 k=10 literal=GTGAATTGCAGAACTCCGTG,CCTCCGCTTACTTATATGCTT outm1=${file}_R1_NoIll_NoITS.fastq outu1=${file}_R1_check.fastq outm2=${file}_R2_NoIll_NoITS.fastq outu2=${file}_R2_check.fastq; done &>bbduk_NoITS.log
+
+#renaming file names
+# for longer file names:
+# for file in *_NoITS.fastq
+# do export first6=${file:0:6}
+# echo ${first6}
+# cp $file ./renamed/${first6}.fastq
+# done
+# 
+# for shorter file names:
+# for file in *_NoITS.fastq
+# do export first5=${file:0:5}
+# echo ${first5}
+# cp $file ./renamed/${first5}.fastq
+# done
+
+# did sftp of *_NoITS.fastq files to the folder to be used in dada2
+
+#####################################
+
+#~########################~#
+##### DADA2 BEGINS #########
+#~########################~#
+
+#installing/loading packages:
+```{r}
+#if (!requireNamespace("BiocManager", quietly = TRUE))
+#  install.packages("BiocManager")
+#BiocManager::install("dada2", version = "3.8")
+```
+
+#Set Path and read-in data
+```{r}
+library(dada2); packageVersion("dada2")
+#I have version 1.10.1 - tutorial says 1.8 but I think that's OK, can't find a version 1.10 walkthrough
+
+path <- "/Users/christiangagnon/Documents/BI594/rdecamp" # CHANGE ME to the directory containing the fastq files after unzipping.
+fns <- list.files(path)
+fns
+
+fastqs <- fns[grepl(".fastq$", fns)]
+fastqs <- sort(fastqs) # Sort ensures forward/reverse reads are in same order
+fnFs <- fastqs[grepl("_R1", fastqs)] # Just the forward read files
+fnRs <- fastqs[grepl("_R2", fastqs)] # Just the reverse read files
+
+# Get sample names, assuming files named as so: SAMPLENAME_XXX.fastq; OTHERWISE MODIFY
+sample.names <- sapply(strsplit(fnFs, "_"), `[`, 1) #the last number will select the field for renaming
+# Specify the full path to the fnFs and fnRs
+fnFs <- file.path(path, fnFs)
+fnRs <- file.path(path, fnRs)
+```
+
+###### Visualizing raw data
+#Used quality profile to decide to trim at 200 bp
+
+```{r}
+#First, lets look at quality profile of R1 reads
+
+plotQualityProfile(fnFs[c(1,2,3,4)])
+plotQualityProfile(fnFs[c(90,91,92,93)])
+
+#Then look at quality profile of R2 reads
+
+plotQualityProfile(fnRs[c(1,2,3,4)])
+plotQualityProfile(fnRs[c(90,91,92,93)])
+
+#starts to drop off around 200 bp, will make that the cutoff values for filter&trim below
+```
+
+# Make directory and filenames for the filtered fastqs
+```{r}
+filt_path <- file.path(path, "trimmed")
+if(!file_test("-d", filt_path)) dir.create(filt_path)
+filtFs <- file.path(filt_path, paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path(filt_path, paste0(sample.names, "_R_filt.fastq.gz"))
+
+#changing a bit from default settings - maxEE=1 (1 max expected error, more conservative), truncating length at 200 bp for both forward & reverse [leaves ~50bp overlap], added "trimleft" to cut off primers [18 for forward, 20 for reverse]
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, 
+                     truncLen=c(200,200), #leaves ~50bp overlap
+                     maxN=0, #DADA does not allow Ns
+                     maxEE=c(1,1), #allow 1 expected errors, where EE = sum(10^(-Q/10)); more conservative, model converges
+                     truncQ=2, 
+                     trimLeft=c(20,21), #N nucleotides to remove from the start of each read
+                     rm.phix=TRUE, #remove reads matching phiX genome
+                     matchIDs=TRUE, #enforce matching between id-line sequence identifiers of F and R reads
+                     compress=TRUE, multithread=TRUE) # On Windows set multithread=FALSE
+
+head(out)
+tail(out)
+```
+
+#~############################~#
+##### Learn Error Rates ########
+#~############################~#
+```{r}
+setDadaOpt(MAX_CONSIST=30) #increase number of cycles to allow convergence
+errF <- learnErrors(filtFs, multithread=TRUE)
+errR <- learnErrors(filtRs, multithread=TRUE)
+
+#sanity check: visualize estimated error rates
+#error rates should decline with increasing qual score
+#red line is based on definition of quality score alone
+#black line is estimated error rate after convergence
+#dots are observed error rate for each quality score
+
+plotErrors(errF, nominalQ=TRUE) 
+plotErrors(errR, nominalQ=TRUE) 
+```
+
+#~############################~#
+##### Dereplicate reads ########
+#~############################~#
+
+#Dereplication: These quality profiles inform the error model of the denoising step, significantly increasing DADA2’s accuracy
+
+```{r}
+#Dereplication combines all identical sequencing reads into into “unique sequences” with a corresponding “abundance”: the number of reads with that unique sequence. 
+#Dereplication substantially reduces computation time by eliminating redundant comparisons.
+#DADA2 retains a summary of the quality information associated with each unique sequence. The consensus quality profile of a unique sequence is the average of the positional qualities from the dereplicated reads. These quality profiles inform the error model of the subsequent denoising step, significantly increasing DADA2’s accuracy.
+derepFs <- derepFastq(filtFs, verbose=TRUE)
+derepRs <- derepFastq(filtRs, verbose=TRUE)
+# Name the derep-class objects by the sample names
+names(derepFs) <- sample.names
+names(derepRs) <- sample.names
+```
+
+#~###############################~#
+##### Infer Sequence Variants #####
+#~###############################~#
+```{r}
+setDadaOpt(BAND_SIZE=32)
+
+dadaFs <- dada(derepFs, err=errF, multithread=TRUE)
+dadaRs <- dada(derepRs, err=errR, multithread=TRUE)
+
+#now, look at the dada class objects by sample
+#will tell how many 'real' variants in unique input seqs
+#By default, the dada function processes each sample independently, but pooled processing is available with pool=TRUE and that may give better results for low sampling depths at the cost of increased computation time. See our discussion about pooling samples for sample inference. 
+dadaFs[[1]]
+dadaRs[[1]]
+```
+
+#~############################~#
+##### Merge paired reads #######
+#~############################~#
+```{r}
+#To further cull spurious sequence variants
+#Merge the denoised forward and reverse reads
+#Paired reads that do not exactly overlap are removed
+
+mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose=TRUE)
+# Inspect the merger data.frame from the first sample
+head(mergers[[1]])
+
+summary((mergers[[1]]))
+
+#We now have a data.frame for each sample with the merged $sequence, its $abundance, and the indices of the merged $forward and $reverse denoised sequences. Paired reads that did not exactly overlap were removed by mergePairs.
+```
+
+#~##################################~#
+##### Construct sequence table #######
+#~##################################~#
+
+#Used the sequence plot to create our OTU table: variants appear to be in the 290-306 window (different from 16S analysis)
+
+```{r}
+#a higher-resolution version of the “OTU table” produced by classical methods
+
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+
+# Inspect distribution of sequence lengths
+table(nchar(getSequences(seqtab)))
+
+plot(table(nchar(getSequences(seqtab)))) #real variants appear to be right in that 244-264 window
+
+#The sequence table is a matrix with rows corresponding to (and named by) the samples, and 
+#columns corresponding to (and named by) the sequence variants. 
+#Sequences that are much longer or shorter than expected may be the result of non-specific priming, and may be worth removing
+
+seqtab2 <- seqtab[,nchar(colnames(seqtab)) %in% seq(290,306)] #again, being fairly conservative wrt length
+
+table(nchar(getSequences(seqtab2)))
+dim(seqtab2)
+```
+
+#~############################~#
+##### Remove chimeras ##########
+#~############################~#
+```{r}
+#The core dada method removes substitution and indel errors, but chimeras remain. 
+#Fortunately, the accuracy of the sequences after denoising makes identifying chimeras easier 
+#than it is when dealing with fuzzy OTUs: all sequences which can be exactly reconstructed as 
+#a bimera (two-parent chimera) from more abundant sequences.
+
+seqtab.nochim <- removeBimeraDenovo(seqtab2, method="consensus", multithread=TRUE, verbose=TRUE)
+dim(seqtab.nochim)
+#Identified 39 bimeras out of 114 input sequences.
+
+sum(seqtab.nochim)/sum(seqtab2)
+#0.9955
+#The fraction of chimeras varies based on factors including experimental procedures and sample complexity, 
+#but can be substantial.
+```
+
+#~############################~#
+##### Track Read Stats #########
+#~############################~#
+```{r}
+getN <- function(x) sum(getUniques(x))
+track <- cbind(out, sapply(dadaFs, getN), sapply(mergers, getN), rowSums(seqtab2), rowSums(seqtab.nochim))
+colnames(track) <- c("input", "filtered", "denoised", "merged", "tabled", "nonchim")
+rownames(track) <- sample.names
+head(track)
+tail(track)
+
+write.csv(track,file="mrits_readstats.csv",row.names=TRUE,quote=FALSE)
+```
+
+#~############################~#
+##### Assign Taxonomy ##########
+#~############################~#
+
+#we downlaoded the fungal data from the UNITE online fungal database at: https://unite.ut.ee/repository.php#general.
+#We selected the most recent database but used the smaller of the two version because we could not get the larger on to upload through R for the analysis.
+```{r}
+taxa <- assignTaxonomy(seqtab.nochim, "/Users/christiangagnon/Documents/BI594/sh_general_release_dynamic_02.02.2019.fasta",multithread = TRUE, tryRC=TRUE)
+unname(head(taxa))
+
+taxa.print <- taxa  # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+#to come back to later
+#saveRDS(seqtab.nochim, file="/Users/christiangagnon/Documents/BI594/mrits_seqtab.nochim.rds")
+#saveRDS(taxa, file="~/Desktop/mrits/mrits_taxa.rds")
+
+#write.csv(seqtab.nochim, file="~/Desktop/mrits/mrits_seqtab.nochim.csv")
+#write.csv(taxa, file="~/Desktop/mrits/mrits_taxa.csv")
+
+#If you need to read in previously saved datafiles
+#seqtab.nochim <- readRDS("mrits_seqtab.nochim.rds")
+#taxa <- readRDS("mrits_taxa.rds")
+```
+
+#~############################~#
+##### handoff 2 phyloseq #######
+#~############################~#
+```{r}
+#BiocManager::install("phyloseq")
+BiocManager::install("Rmisc")
+library('phyloseq')
+library('ggplot2')
+library('Rmisc')
+
+#import dataframe holding sample information
+samdf<-read.csv("/Users/christiangagnon/Documents/BI594/mrits_sampledata.csv")
+head(samdf)
+rownames(samdf) <- samdf$Sample
+
+# Construct phyloseq object (straightforward from dada2 outputs)
+ps <- phyloseq(otu_table(seqtab.nochim, taxa_are_rows=FALSE), 
+               sample_data(samdf), 
+               tax_table(taxa))
+
+ps
+```
+
+#Visualize alpha-diversity - ***Should be done on raw, untrimmed dataset***
+#total species diversity in a landscape (gamma diversity) is determined by two different things, the mean species diversity in sites or habitats at a more local scale (alpha diversity) and the differentiation among those habitats (beta diversity)
+#Shannon:Shannon entropy quantifies the uncertainty (entropy or degree of surprise) associated with correctly predicting which letter will be the next in a diverse string. Based on the weighted geometric mean of the proportional abundances of the types, and equals the logarithm of true diversity. When all types in the dataset of interest are equally common, the Shannon index hence takes the value ln(actual # of types). The more unequal the abundances of the types, the smaller the corresponding Shannon entropy. If practically all abundance is concentrated to one type, and the other types are very rare (even if there are many of them), Shannon entropy approaches zero. When there is only one type in the dataset, Shannon entropy exactly equals zero (there is no uncertainty in predicting the type of the next randomly chosen entity).
+#Simpson:equals the probability that two entities taken at random from the dataset of interest represent the same type. equal to the weighted arithmetic mean of the proportional abundances pi of the types of interest, with the proportional abundances themselves being used as the weights. Since mean proportional abundance of the types increases with decreasing number of types and increasing abundance of the most abundant type, λ obtains small values in datasets of high diversity and large values in datasets of low diversity. This is counterintuitive behavior for a diversity index, so often such transformations of λ that increase with increasing diversity have been used instead. The most popular of such indices have been the inverse Simpson index (1/λ) and the Gini–Simpson index (1 − λ).
+
+#Only statistically significant difference was found between zone (in vs offshore); not between sites
+```{r}
+plot_richness(ps, x="site", measures=c("Shannon", "Simpson"), color="in_off") + theme_bw()
+
+df <- data.frame(estimate_richness(ps, split=TRUE, measures =c("Shannon","InvSimpson","Chao1")),sample_data(ps)$site,sample_data(ps)$in_off,sample_data(ps)$Sample,sample_data(ps)$site_zone)
+df
+
+df$site <- df$sample_data.ps..site
+df$name <- df$sample_data.ps..Sample
+df$zone <- df$sample_data.ps..in_off
+df$site_zone <- df$sample_data.ps..site_zone
+
+#write.csv(df,file="~/Desktop/mrits/mrits_diversity.csv")
+#df <- read.csv("~/Desktop/mrits/mrits_diversity.csv")
+
+diver <- summarySE(df,measurevar="Shannon",groupvars=c("site","zone"), na.rm=T)
+diver
+
+pd=position_dodge(.5)
+quartz()
+ggplot(diver, aes(x=site, y=Shannon,group=zone,color=zone,fill=zone,shape=zone))+
+  geom_errorbar(aes(ymin=Shannon-se,ymax=Shannon+se),position=pd,lwd=0.4,width=0.3)+
+  geom_point(aes(colour=zone, shape=zone),size=4,position=pd)+    
+  xlab("Site")+
+  ylab("Shannon Diversity")+
+  theme_bw()+
+  theme(text=element_text(family="Gill Sans MT"))
+
+shzone <- summarySE(df,measurevar="Shannon",groupvars=c("zone"), na.rm=T)
+pd=position_dodge(.5)
+quartz()
+ggplot(shzone, aes(x=zone, y=Shannon,group=zone,color=zone,fill=zone,shape=zone))+
+  geom_errorbar(aes(ymin=Shannon-se,ymax=Shannon+se),position=pd,lwd=0.4,width=0.3)+
+  geom_point(aes(colour=zone, shape=zone),size=4,position=pd)+    
+  xlab("Reef zone")+
+  ylab("Shannon diversity")+
+  theme_classic()+
+  theme(text=element_text(family="Gill Sans MT"))+
+  scale_x_discrete(labels=c("Inshore","Offshore"))
+
+df
+avod <- aov(Shannon~site*zone,data=df)
+summary(avod)
+# Df Sum Sq Mean Sq F value   Pr(>F)    
+# site         2  1.045  0.5225   3.396   0.0379 *  
+#   zone         1  2.892  2.8922  18.797 3.78e-05 ***
+#   site:zone    2  0.011  0.0053   0.034   0.9663    
+# Residuals   90 13.848  0.1539                     
+# ---
+#   Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+diver2 <- summarySE(df,measurevar="InvSimpson",groupvars=c("site","zone"), na.rm=T)
+diver2
+
+quartz()
+ggplot(diver2, aes(x=site, y=InvSimpson,group=zone,color=zone,fill=zone,shape=zone)) +
+  geom_errorbar(aes(ymin=InvSimpson-se,ymax=InvSimpson+se),position=pd,lwd=0.4,width=0.3)+
+  geom_point(aes(colour=zone, shape=zone),size=4,position=pd)+    
+  xlab("Site")+
+  ylab("Inverse Simpson Diversity")+
+  theme_bw()+
+  theme(text=element_text(family="Gill Sans MT"))
+
+diver3 <- summarySE(df,measurevar="Chao1",groupvars=c("site","zone"), na.rm=T)
+diver3
+
+ggplot(diver3, aes(x=site, y=Chao1)) +
+  geom_errorbar(aes(ymin=Chao1-se,ymax=Chao1+se),lwd=0.4,width=0.3)+
+  geom_point(aes(colour = factor(zone), shape=factor(zone)),size=4) +    
+  xlab("Site")+
+  ylab("Inverse Simpson Diversity")+
+  theme_bw()#+
+#scale_colour_manual(values=colorz)
+```
+
+#Bar-plots
+
+#Looks like inshore of MNW and MSE sites has nothing but there is something?
+#Also I got different results from Mel and Christian which is weird since we ran the same code? We think something’s up with the database. So something screwy is going on lmao. 
+
+```{r}
+top30 <- names(sort(taxa_sums(ps), decreasing=TRUE))[1:30]
+ps.top30 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.top30 <- prune_taxa(top30, ps.top30)
+plot_bar(ps.top30, x="site_zone", fill="Phylum") #+ facet_wrap(~ColonyID+Timepoint, scales="free_x")
+
+btm30 <- names(sort(taxa_sums(ps), decreasing=FALSE))[1:30]
+ps.btm30 <- transform_sample_counts(ps, function(OTU) OTU/sum(OTU))
+ps.btm30 <- prune_taxa(btm30, ps.btm30)
+plot_bar(ps.btm30, x="site_zone", fill="Class") #+ facet_wrap(~ColonyID+Timepoint, scales="free_x")
+```
+
+#Mess around with other stuff in phyloseq here...
+
+#~############################~#
+##### output 'OTU' table #######
+#~############################~#
+```{r}
+#seqtab.nochim is the 'OTU' table...but is a little unwieldy
+#For Symbiodinium, sequence classification is not so great...
+#want fasta file of 'OTUs' and table designated by 'OTU'
+
+#First, output fasta file for 'OTUs'
+path='~/Desktop/mrits/mrits.fasta'
+uniquesToFasta(seqtab.nochim, path, ids = NULL, mode = "w", width = 20000)
+
+#then, rename output table and write it out
+ids <- paste0("sq", seq(1, length(colnames(seqtab.nochim))))
+colnames(seqtab.nochim)<-ids
+
+write.csv(seqtab.nochim,file="mrits_AllOTUs.csv",quote=F)
+##replace sequences with shorter names (correspondence table output below)
+taxa_names(ps)<-ids
+str(seqtab.nochim)
+
+#For our purposes, we also want to focus on the corals used in both 2015 and 2016
+#subset data
+# focus = subset_samples(ps, Focus== "Yes")
+# seqtab<-otu_table(focus)
+# ids <- paste0("sq", seq(1, length(colnames(seqtab))))
+# colnames(seqtab)<-ids
+# head(seqtab)
+# write.csv(seqtab,file="Sep21_OutputDADA_AllOTUs_FocusYesOnly.csv",quote=F)
+```
+
+#############################################
+
+######Conclusion#####
+#On average, we found higher fungi diversity in offshore locations than inshore. This is in accordance to Pantos et al., supporting their suggestion that offshore waters may be more suitable for a wider variety of fungal taxa.One site (West Moorea) showed no difference, and overall little to no diversity. High amount of unassigned OTUs in reference to terrestrial database.Future research should consider differences in oceanographic and environmental conditions. Channel between two islands could provide different environmental and oceanographic conditions than the western moorea site. Overall, this provides a first step in differentiating fungal communities at different localities. It is worth noting that Marine fungal databases don’t exist- could have altered results.
